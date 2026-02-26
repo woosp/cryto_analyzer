@@ -69,6 +69,10 @@ st.markdown(
     }
     [data-testid="stMetricValue"] { font-size: 1.7rem; color: #00d4aa; }
 
+    /* 상단 흰색 헤더 바 → 다크 처리 */
+    [data-testid="stHeader"] { background-color: #0d1117 !important; border-bottom: 1px solid #2a3045; }
+    [data-testid="stDecoration"] { display: none !important; }
+
     /* 사이드바 */
     [data-testid="stSidebar"] { background-color: #161a25; color: #e0e0e0; }
     [data-testid="stSidebar"] label { color: #e0e0e0 !important; }
@@ -1671,15 +1675,27 @@ def chart_l1_tvl_categories(cat_data: dict) -> go.Figure:
     values = [v["tvl"] for v in cat_data.values()]
     colors = [v["color"] for v in cat_data.values()]
 
+    total = sum(values) or 1
+    # 5% 이상 슬라이스만 레이블 표시, 작은 슬라이스는 퍼센트만
+    text_list = [
+        f"{l}<br>{v/total*100:.1f}%" if v / total >= 0.05
+        else f"{v/total*100:.1f}%" if v / total >= 0.025
+        else ""
+        for l, v in zip(labels, values)
+    ]
+
     fig = go.Figure(go.Pie(
         labels=labels,
         values=values,
         hole=0.45,
-        textinfo="label+percent",
-        textfont=dict(size=11),
+        text=text_list,
+        textinfo="text",
+        textfont=dict(size=10, color=THEME["text"]),
+        textposition="outside",
         hovertemplate="<b>%{label}</b><br>$%{value:,.0f}<br>%{percent}<extra></extra>",
-        marker=dict(colors=colors),
+        marker=dict(colors=colors, line=dict(color=THEME["bg"], width=1)),
         sort=False,
+        rotation=30,
     ))
     fig.update_layout(
         title=dict(
@@ -1687,8 +1703,9 @@ def chart_l1_tvl_categories(cat_data: dict) -> go.Figure:
             font=dict(color=THEME["text"], size=14),
         ),
         showlegend=False,
+        margin=dict(t=80, b=80, l=80, r=80),
     )
-    _apply_dark_theme(fig, height=420)
+    _apply_dark_theme(fig, height=480)
     return fig
 
 
