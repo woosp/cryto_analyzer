@@ -176,6 +176,7 @@ st.set_page_config(
     page_title="블록체인 보안 분석",
     page_icon="🔐",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 st.markdown(f"""
