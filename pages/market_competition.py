@@ -513,6 +513,110 @@ def chart_tvl_abs_trends(
     return _dark(fig, height=360)
 
 
+def chart_whale_index_trend(
+    tvl_hist: dict[str, pd.Series],
+    show_chains: list[str],
+) -> go.Figure:
+    """
+    고래화 지수 추이 (Whale-ification Trend)
+    = TVL(t) ÷ DAU_추정 — $K per user 시계열
+
+    DAU는 반정적 추정치이므로 이 차트의 움직임은
+    TVL 성장 속도 ÷ 사용자 기반의 상대적 자본화 속도를 반영.
+    어떤 체인의 선이 ETH 기준선을 향해 빠르게 오른다면
+    → 기관·고래 자금이 그 체인으로 이동 중이라는 신호.
+    """
+    fig = go.Figure()
+    eth_series_vals = None   # ETH 기준선용
+
+    for chain in show_chains:
+        s   = tvl_hist.get(chain, pd.Series(dtype=float))
+        dau = DAU_ESTIMATES.get(chain, 1)
+        if s.empty:
+            continue
+
+        eff = (s / dau / 1_000).round(3)   # $K per user
+
+        if chain == "Ethereum":
+            eth_series_vals = eff
+
+        # 30일 이동 평균으로 노이즈 제거
+        eff_smooth = eff.rolling(7, min_periods=1).mean().round(3)
+
+        fig.add_trace(go.Scatter(
+            x    = eff_smooth.index,
+            y    = eff_smooth.values,
+            name = f"{CHAINS[chain]['icon']} {chain}",
+            mode = "lines",
+            line = dict(color=CHAINS[chain]["color"], width=2.2),
+            hovertemplate = (
+                f"<b>{CHAINS[chain]['icon']} {chain}</b><br>"
+                "날짜: %{x|%Y-%m-%d}<br>"
+                "사용자당 TVL: $%{y:,.1f}K<extra></extra>"
+            ),
+        ))
+
+        # 신흥 체인 (< 180일 데이터): 점선 미래 추세 추가
+        if len(s) < 180 and chain != "Ethereum":
+            recent_n = min(30, len(eff_smooth))
+            recent   = eff_smooth.iloc[-recent_n:]
+            x_num    = np.arange(len(recent), dtype=float)
+            slope, intercept = np.polyfit(x_num, recent.values, 1)
+            fut_dates = [recent.index[-1] + timedelta(days=i + 1) for i in range(90)]
+            fut_vals  = [max(0.0, slope * (len(x_num) + i) + intercept) for i in range(90)]
+
+            fig.add_trace(go.Scatter(
+                x         = fut_dates,
+                y         = [round(v, 3) for v in fut_vals],
+                name      = f"{chain} (90일 예측)",
+                mode      = "lines",
+                line      = dict(color=CHAINS[chain]["color"], width=1.5, dash="dot"),
+                showlegend= True,
+                hovertemplate = f"<b>{chain} 예측</b>: $%{{y:,.1f}}K<extra></extra>",
+            ))
+
+    # ETH 현재값 기준선
+    if eth_series_vals is not None and not eth_series_vals.empty:
+        eth_latest = float(eth_series_vals.rolling(7, min_periods=1).mean().iloc[-1])
+        fig.add_hline(
+            y=eth_latest,
+            line_dash="dot",
+            line_color=CHAINS["Ethereum"]["color"],
+            opacity=0.5,
+            annotation_text=f"  ETH 현재 기준 ${eth_latest:,.0f}K",
+            annotation_font_color=CHAINS["Ethereum"]["color"],
+            annotation_font_size=10,
+            annotation_position="bottom right",
+        )
+
+    fig.update_layout(
+        title = dict(
+            text="🐳 고래화 지수 추이 — 사용자당 TVL ($K/DAU) 시계열",
+            font=dict(color=THEME["text"], size=14),
+        ),
+        xaxis = dict(
+            title="날짜",
+            gridcolor=THEME["grid"], linecolor=THEME["grid"],
+        ),
+        yaxis = dict(
+            title="TVL per DAU ($K)",
+            gridcolor=THEME["grid"], linecolor=THEME["grid"],
+        ),
+        legend = dict(
+            bgcolor=THEME["paper"], bordercolor=THEME["grid"], borderwidth=1,
+            font=dict(color=THEME["text"], size=11),
+            orientation="h", y=-0.18, xanchor="center", x=0.5,
+        ),
+        hovermode = "x unified",
+        margin    = dict(t=75, b=110, l=65, r=30),
+        height    = 480,
+        paper_bgcolor = THEME["paper"],
+        plot_bgcolor  = THEME["bg"],
+        font = dict(color=THEME["text"], family="Inter, -apple-system, sans-serif", size=12),
+    )
+    return fig
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  메인
 # ═══════════════════════════════════════════════════════════════════════
@@ -652,6 +756,73 @@ def main():
   Berachain이 높으면 → 이더리움의 <b>Yield Farmer</b>들이 대거 이동한 증거.<br>
   Solana가 낮으면 → <b>개인 투자자(Retail)</b> 위주 체인임을 의미.
 </div>""", unsafe_allow_html=True)
+
+    # ── 섹션 2-B: 고래화 지수 추이 ──────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 🐳 고래화 지수 추이 — 어떤 체인이 가장 빠르게 '기관화'되는가?")
+    st.caption(
+        "공식: **TVL(t) ÷ DAU 추정 = 사용자 1인당 예탁 자본 ($K)**  |  "
+        "DAU는 반정적 추정치이므로 실질적으로는 TVL 성장 가속도를 반영.  "
+        "ETH 기준선(점선)을 향해 급등하는 체인 = 기관·고래 자금 유입 신호."
+    )
+
+    fig_whale = chart_whale_index_trend(tvl_hist, show_chains)
+    st.plotly_chart(fig_whale, use_container_width=True)
+
+    # 가장 빠르게 고래화되는 체인 자동 탐지
+    _growth_rates = {}
+    for chain in show_chains:
+        s   = tvl_hist.get(chain, pd.Series(dtype=float))
+        dau = DAU_ESTIMATES.get(chain, 1)
+        if len(s) < 14:
+            continue
+        eff = s / dau / 1_000
+        recent_30 = eff.iloc[-min(30, len(eff)):]
+        if len(recent_30) >= 7:
+            x_n = np.arange(len(recent_30), dtype=float)
+            slope_val = np.polyfit(x_n, recent_30.values, 1)[0]
+            _growth_rates[chain] = slope_val   # $K/day 증가 속도
+
+    if _growth_rates:
+        fastest = max(_growth_rates, key=lambda c: _growth_rates[c])
+        slowest = min(_growth_rates, key=lambda c: _growth_rates[c])
+        col_w1, col_w2, col_w3 = st.columns(3)
+        col_w1.metric(
+            "🚀 가장 빠른 고래화",
+            fastest,
+            f"+${_growth_rates[fastest]*30:,.1f}K / 30일",
+            help="최근 30일간 사용자당 TVL 증가 속도",
+        )
+        col_w2.metric(
+            "📉 가장 느린 고래화",
+            slowest,
+            f"${_growth_rates[slowest]*30:,.1f}K / 30일",
+            delta_color="off",
+        )
+        eth_rate = _growth_rates.get("Ethereum", 0)
+        if eth_rate != 0:
+            top_ratio = _growth_rates[fastest] / eth_rate if fastest != "Ethereum" else 1.0
+            col_w3.metric(
+                "ETH 대비 고래화 가속도",
+                f"ETH의 {top_ratio:.1f}배",
+                fastest,
+                delta_color="inverse" if top_ratio > 1 else "normal",
+                help=f"{fastest}의 고래화 속도가 ETH보다 {top_ratio:.1f}배 빠름",
+            )
+
+    st.markdown(f"""
+<div style="background:{THEME['card']};border-left:3px solid {THEME['teal']};
+            padding:0.8rem 1.1rem;border-radius:6px;font-size:0.8rem;
+            color:{THEME['text']};line-height:1.7;margin-top:0.5rem;">
+  <b>🎯 투자 신호 해석 가이드</b><br>
+  • Berachain / Monad의 선이 <b>ETH 기준선(점선)</b>을 향해 가파르게 오른다면
+    → 이더리움에서 기관 자금이 해당 체인으로 이동하기 시작한 <b>강력한 매도 신호</b>.<br>
+  • 신흥 체인(점선 구간)의 기울기가 가파를수록
+    → <b>90일 내 ETH 기준선 도달</b> 가능성이 높아짐.<br>
+  • DAU가 고정값이므로 이 지표는 실질적으로 <b>TVL 성장 가속도</b>를 나타냄.
+</div>""", unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
 
     # ── 섹션 3: 파이 침식 차트 ──────────────────────────────────────
     st.markdown("---")
