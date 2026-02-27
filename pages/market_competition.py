@@ -105,6 +105,54 @@ DAU_ESTIMATES: dict[str, int] = {
     "Monad":     150_000,    # 메인넷 초기 추정 (2025년 말 런칭)
 }
 
+# ── 실질 수익률 관련 상수 ─────────────────────────────────────────────
+# 연간 토큰 발행률 (% of circulating supply)
+# 출처: Token Terminal / 각 체인 백서 2026 Q1 기준
+EMISSION_RATES_PCT: dict[str, float] = {
+    "Ethereum":  -0.3,   # EIP-1559 소각으로 실질 디플레이션 (net negative)
+    "Solana":     5.5,   # ~5–6% 검증인 스테이킹 보상
+    "Aptos":      7.0,   # ~7% 스테이킹 인플레이션
+    "Berachain": 22.0,   # PoL 초기 고발행률 (유동성 증명 인센티브)
+    "Monad":      4.8,   # 메인넷 초기 추정치
+}
+
+# 일별 수수료 수익 폴백 ($M/day, Q1 2026 추정)
+# DefiLlama API 실패 시 사용
+DAILY_FEES_FALLBACK: dict[str, float] = {
+    "Ethereum":  14.0,   # L1 + EIP-4844 이후 blobs 수수료 포함
+    "Solana":     5.2,
+    "Aptos":      0.4,
+    "Berachain":  1.6,
+    "Monad":      0.7,
+}
+
+# ── 개발자 활동 — GitHub 레포지터리 ──────────────────────────────────
+GITHUB_REPOS: dict[str, tuple[str, str]] = {
+    "Ethereum":  ("ethereum",    "go-ethereum"),
+    "Solana":    ("solana-labs", "solana"),
+    "Aptos":     ("aptos-labs",  "aptos-core"),
+    "Berachain": ("berachain",   "beacon-kit"),
+    "Monad":     ("monad-xyz",   "monad"),   # 신규 — 없을 수 있음
+}
+
+# GitHub 실패 시 폴백 (28일 커밋 수 추정, 2026 Q1)
+DEV_COMMITS_FALLBACK: dict[str, int] = {
+    "Ethereum":  340,
+    "Solana":    295,
+    "Aptos":     185,
+    "Berachain": 130,
+    "Monad":     220,   # 빠른 개발 속도 (초기 단계)
+}
+
+# CoinGecko IDs (시가총액 조회용)
+COINGECKO_IDS: dict[str, str] = {
+    "Ethereum":  "ethereum",
+    "Solana":    "solana",
+    "Aptos":     "aptos",
+    "Berachain": "berachain-bera",
+    "Monad":     "monad",
+}
+
 # ── 페이지 설정 ──────────────────────────────────────────────────────
 st.set_page_config(
     page_title="파이 강탈자 분석",
@@ -214,6 +262,83 @@ def _data_window_label(series: pd.Series, window: int) -> str:
     if avail < window:
         return f"{used}일 (전체 이력)"
     return f"{window}일"
+
+
+@st.cache_data(ttl=3600)
+def fetch_chain_fees_30d_avg(llama_chain: str) -> float:
+    """
+    DefiLlama overview/fees/{chain}: 30일 평균 일별 수수료 수익 (USD)
+    totalDataChart = [[timestamp, fees_usd], ...]
+    """
+    try:
+        url = (
+            f"https://api.llama.fi/overview/fees/{llama_chain}"
+            f"?dataType=dailyFees&excludeTotalDataChart=false"
+        )
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        data  = resp.json()
+        chart = data.get("totalDataChart", [])
+        if not chart:
+            return 0.0
+        recent = chart[-min(30, len(chart)):]
+        # Each entry: [timestamp, value]
+        vals = [float(r[1]) for r in recent if len(r) >= 2 and r[1]]
+        return sum(vals) / len(vals) if vals else 0.0
+    except Exception:
+        return 0.0
+
+
+@st.cache_data(ttl=86_400)
+def fetch_github_commits_28d(owner: str, repo: str) -> int | None:
+    """
+    GitHub REST API: 최근 28일 커밋 수 (인증 없음 → 60 req/hr 제한)
+    GET /repos/{owner}/{repo}/commits?since=...&per_page=100
+    """
+    try:
+        since = (datetime.utcnow() - timedelta(days=28)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        total, page = 0, 1
+        while page <= 5:   # 최대 500 커밋까지
+            resp = requests.get(
+                f"https://api.github.com/repos/{owner}/{repo}/commits",
+                params={"since": since, "per_page": 100, "page": page},
+                headers={"Accept": "application/vnd.github+json"},
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                break
+            batch = resp.json()
+            if not batch:
+                break
+            total += len(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        return total if total > 0 else None
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600)
+def fetch_market_caps_cg(chain_list: list) -> dict:
+    """
+    CoinGecko /coins/markets: 체인별 시가총액 ($USD)
+    """
+    ids_str = ",".join(COINGECKO_IDS[c] for c in chain_list if c in COINGECKO_IDS)
+    if not ids_str:
+        return {}
+    try:
+        resp = requests.get(
+            "https://api.coingecko.com/api/v3/coins/markets",
+            params={"vs_currency": "usd", "ids": ids_str, "per_page": 10, "sparkline": False},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        # reverse-map coingecko_id → chain_name
+        rev = {v: k for k, v in COINGECKO_IDS.items()}
+        return {rev[d["id"]]: d.get("market_cap", 0) for d in resp.json() if d["id"] in rev}
+    except Exception:
+        return {}
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -617,6 +742,214 @@ def chart_whale_index_trend(
     return fig
 
 
+def chart_real_yield(
+    fee_data:  dict[str, float],   # 일별 수수료 수익 ($M)
+    mcap_data: dict[str, float],   # 시가총액 ($)
+    show_chains: list[str],
+) -> go.Figure:
+    """
+    실질 수익률 (Real Yield) 비교 차트
+    - 연간 수수료 수익률 (%)  = 일별 수수료 × 365 / 시가총액 × 100
+    - 연간 인플레이션 비율 (%) = EMISSION_RATES_PCT
+    - 순 실질 수익률 (%)      = 수수료 수익률 - 인플레이션
+    양수(흑자 체인) vs 음수(인플레이션 > 수수료 = 가치 희석 위험)
+    """
+    chains, fee_yield, emission, net_yield = [], [], [], []
+
+    for chain in show_chains:
+        mcap = mcap_data.get(chain, 0)
+        fee  = fee_data.get(chain, 0) * 1e6   # $M → $
+        if mcap <= 0:
+            continue
+        fy  = (fee * 365 / mcap) * 100
+        em  = EMISSION_RATES_PCT.get(chain, 0.0)
+        net = fy - em
+        chains.append(chain)
+        fee_yield.append(round(fy, 3))
+        emission.append(round(em, 3))
+        net_yield.append(round(net, 3))
+
+    if not chains:
+        return go.Figure()
+
+    order      = sorted(range(len(net_yield)), key=lambda i: net_yield[i], reverse=True)
+    chains     = [chains[i]    for i in order]
+    fee_yield  = [fee_yield[i] for i in order]
+    emission   = [emission[i]  for i in order]
+    net_yield  = [net_yield[i] for i in order]
+
+    fig = go.Figure()
+
+    # 수수료 수익률 바
+    fig.add_trace(go.Bar(
+        name         = "연간 수수료 수익률",
+        x            = chains,
+        y            = fee_yield,
+        marker_color = THEME["teal"],
+        text         = [f"+{v:.2f}%" for v in fee_yield],
+        textposition = "outside",
+        textfont     = dict(color=THEME["teal"], size=10),
+        hovertemplate = "<b>%{x}</b><br>수수료 수익률: %{y:.3f}%<extra></extra>",
+    ))
+
+    # 인플레이션 바 (음수 방향)
+    fig.add_trace(go.Bar(
+        name         = "연간 인플레이션 비율",
+        x            = chains,
+        y            = [-e for e in emission],
+        marker_color = THEME["red"],
+        text         = [f"−{e:.1f}%" if e > 0 else f"+{abs(e):.1f}%소각" for e in emission],
+        textposition = "outside",
+        textfont     = dict(color=THEME["red"], size=10),
+        hovertemplate = "<b>%{x}</b><br>인플레이션: %{customdata:.1f}%<extra></extra>",
+        customdata   = emission,
+    ))
+
+    # 순 실질 수익률 점 마커
+    net_colors = [THEME["green"] if n >= 0 else THEME["orange"] for n in net_yield]
+    fig.add_trace(go.Scatter(
+        name         = "순 실질 수익률",
+        x            = chains,
+        y            = net_yield,
+        mode         = "markers+text",
+        marker       = dict(size=14, color=net_colors, symbol="diamond",
+                            line=dict(color=THEME["paper"], width=1.5)),
+        text         = [f"{n:+.2f}%" for n in net_yield],
+        textposition = "top center",
+        textfont     = dict(color=THEME["gold"], size=11, family="Inter"),
+        hovertemplate = "<b>%{x}</b><br>순 실질 수익률: %{y:+.3f}%<extra></extra>",
+    ))
+
+    fig.add_hline(y=0, line_color=THEME["gold"], line_width=1.2, line_dash="dot")
+
+    fig.update_layout(
+        barmode = "relative",
+        title   = dict(
+            text="💰 실질 수익률 (Real Yield) — 수수료 수익률 vs 인플레이션",
+            font=dict(color=THEME["text"], size=14),
+        ),
+        yaxis = dict(
+            title="연간 비율 (%)",
+            gridcolor=THEME["grid"], linecolor=THEME["grid"],
+            zeroline=True, zerolinecolor=THEME["gold"], zerolinewidth=1.2,
+        ),
+        xaxis      = dict(gridcolor=THEME["grid"]),
+        legend     = dict(
+            bgcolor=THEME["paper"], bordercolor=THEME["grid"], borderwidth=1,
+            font=dict(color=THEME["text"], size=11),
+            orientation="h", y=-0.18, xanchor="center", x=0.5,
+        ),
+        margin = dict(t=75, b=100, l=65, r=30),
+    )
+    return _dark(fig, height=440)
+
+
+def chart_dev_capital_bubble(
+    tvl_hist:    dict[str, pd.Series],
+    tvl_now:     dict[str, float],
+    dev_commits: dict[str, int],
+    show_chains: list[str],
+    momentum_window: int = 30,
+) -> go.Figure:
+    """
+    개발자 모멘텀 vs 자본 모멘텀 버블 차트
+    X축: 활성 개발자 커밋 수 (최근 28일) — 미래 가치 선행 지표
+    Y축: TVL 30일 모멘텀 (%) — 현재 자본 유입 속도
+    버블 크기: 사용자당 자본 효율성 (TVL ÷ DAU, $K)
+    4분면 해석:
+      Q1 (우상): 고개발 + 고자본 → 현재 + 미래 모두 강한 체인
+      Q2 (좌상): 저개발 + 고자본 → 자본 버블 위험 (개발 없이 자금만)
+      Q3 (우하): 고개발 + 저자본 → 주목 구간 — 개발자가 먼저 온다
+      Q4 (좌하): 저개발 + 저자본 → 쇠퇴 신호
+    """
+    fig = go.Figure()
+
+    for chain in show_chains:
+        commits = dev_commits.get(chain, 0)
+        tvl_mom = _momentum_pct(tvl_hist.get(chain, pd.Series(dtype=float)), momentum_window)
+        tvl_val = tvl_now.get(chain, 0)
+        dau     = DAU_ESTIMATES.get(chain, 1)
+        cap_eff = tvl_val / dau / 1_000 if tvl_val > 0 else 1.0   # $K per user
+
+        if commits == 0 or tvl_mom is None:
+            continue
+
+        c = CHAINS[chain]
+        bubble_size = max(10, min(80, cap_eff * 0.4))   # 시각화용 스케일
+
+        fig.add_trace(go.Scatter(
+            x    = [commits],
+            y    = [round(tvl_mom, 2)],
+            name = f"{c['icon']} {chain}",
+            mode = "markers+text",
+            marker = dict(
+                size      = bubble_size,
+                color     = c["color"],
+                opacity   = 0.8,
+                line      = dict(color=THEME["paper"], width=2),
+                sizemode  = "diameter",
+            ),
+            text         = [chain],
+            textposition = "top center",
+            textfont     = dict(color=THEME["text"], size=11),
+            customdata   = [[cap_eff, commits, round(tvl_mom, 2)]],
+            hovertemplate = (
+                f"<b>{c['icon']} {chain}</b><br>"
+                "개발자 커밋 (28d): %{customdata[0][1]}<br>"
+                "TVL 모멘텀: %{customdata[0][2]:+.1f}%<br>"
+                "사용자당 TVL: $%{customdata[0][0]:,.0f}K<extra></extra>"
+            ),
+        ))
+
+    # 4분면 구분선 (중간값)
+    all_commits = [
+        dev_commits.get(c, 0) for c in show_chains if dev_commits.get(c, 0) > 0
+    ]
+    all_moms = [
+        _momentum_pct(tvl_hist.get(c, pd.Series(dtype=float)), momentum_window)
+        for c in show_chains
+    ]
+    all_moms = [m for m in all_moms if m is not None]
+
+    if all_commits and all_moms:
+        mid_x = float(np.median(all_commits))
+        mid_y = float(np.median(all_moms))
+        fig.add_vline(x=mid_x, line_dash="dot", line_color=THEME["grid"], opacity=0.6)
+        fig.add_hline(y=mid_y, line_dash="dot", line_color=THEME["grid"], opacity=0.6)
+        fig.add_hline(y=0,     line_dash="dash", line_color=THEME["gold"], opacity=0.4)
+
+        # 4분면 레이블
+        for label, ax, ay, anchor in [
+            ("🔥 핫 체인", mid_x * 1.6, mid_y * 1.5, "left"),
+            ("💰 자본 버블?", mid_x * 0.4, mid_y * 1.5, "right"),
+            ("👀 주목 구간", mid_x * 1.6, mid_y * 0.4, "left"),
+            ("📉 쇠퇴 신호", mid_x * 0.4, mid_y * 0.4, "right"),
+        ]:
+            fig.add_annotation(
+                x=ax, y=ay, text=label, showarrow=False,
+                font=dict(color=THEME["subtext"], size=9),
+                xanchor=anchor,
+            )
+
+    fig.update_layout(
+        title = dict(
+            text="🫧 개발자 모멘텀 vs 자본 모멘텀 (버블 크기 = 사용자당 TVL)",
+            font=dict(color=THEME["text"], size=14),
+        ),
+        xaxis = dict(
+            title="활성 개발자 커밋 수 (최근 28일)",
+            gridcolor=THEME["grid"], linecolor=THEME["grid"],
+        ),
+        yaxis = dict(
+            title=f"TVL {momentum_window}일 모멘텀 (%)",
+            gridcolor=THEME["grid"], linecolor=THEME["grid"],
+        ),
+        showlegend = False,
+        margin     = dict(t=75, b=60, l=65, r=30),
+    )
+    return _dark(fig, height=460)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  메인
 # ═══════════════════════════════════════════════════════════════════════
@@ -994,6 +1327,124 @@ Capital Efficiency per DAU = TVL($) ÷ DAU
 - Monad·Berachain 데이터는 메인넷 출시 이후 단기 이력만 존재
 - TVL은 DefiLlama 집계 기준 (일부 브리지·네이티브 자산 제외 가능)
 """)
+
+    # ── 섹션 5: 실질 수익률 (Real Yield) ────────────────────────────
+    st.markdown("---")
+    st.markdown("### 💰 실질 수익률 (Real Yield) — 진짜 수익의 행방")
+    st.caption(
+        "**공식**: 순 실질 수익률 = 연간 수수료 수익률(%) − 연간 인플레이션(%)  |  "
+        "양수 = 경제적 흑자 체인 / 음수 = 코인 희석으로 이자 지급 (가짜 이자)"
+    )
+
+    with st.spinner("수수료 & 시가총액 데이터 로드 중..."):
+        # 수수료 데이터 (DefiLlama, 실패 시 폴백)
+        fee_map: dict[str, float] = {}
+        for chain in show_chains:
+            llama = CHAINS[chain]["llama_name"]
+            val   = fetch_chain_fees_30d_avg(llama)
+            fee_map[chain] = val if val > 0 else DAILY_FEES_FALLBACK.get(chain, 0.0)
+
+        # 시가총액 (CoinGecko)
+        mcap_raw = fetch_market_caps_cg(show_chains)
+        # 실패한 체인은 TVL × 3을 대략 추정 (mcap / TVL ≈ 3 rough proxy)
+        mcap_map: dict[str, float] = {}
+        for chain in show_chains:
+            mcap_map[chain] = mcap_raw.get(chain, tvl_now.get(chain, 0) * 3)
+
+    st.plotly_chart(
+        chart_real_yield(fee_map, mcap_map, show_chains),
+        use_container_width=True,
+    )
+
+    # 해석 박스
+    _eth_net = None
+    if mcap_map.get("Ethereum", 0) > 0:
+        fy  = fee_map.get("Ethereum", 0) * 1e6 * 365 / mcap_map["Ethereum"] * 100
+        _eth_net = fy - EMISSION_RATES_PCT.get("Ethereum", 0)
+
+    _positive_chains = [
+        c for c in show_chains
+        if mcap_map.get(c, 0) > 0 and (
+            fee_map.get(c, 0) * 1e6 * 365 / mcap_map[c] * 100
+            - EMISSION_RATES_PCT.get(c, 0)
+        ) >= 0
+    ]
+    st.markdown(f"""
+<div style="background:{THEME['card']};border-left:3px solid {THEME['gold']};
+            padding:0.8rem 1.1rem;border-radius:6px;font-size:0.8rem;
+            color:{THEME['text']};line-height:1.7;">
+  <b>🔍 해석 가이드</b><br>
+  • <b>순 실질 수익률 양수</b> → 사용자 수수료가 신규 발행량을 초과.
+    해당 체인은 '흑자 기업'처럼 자생적 가치를 창출하는 구조.<br>
+  • 이더리움의 <b>EIP-1559 소각 메커니즘</b>은 트래픽이 많을수록 실질 수익률이 높아지는 구조.<br>
+  • 베라체인·앱토스처럼 인플레이션이 높은 체인은 높은 APY의 실체가
+    '코인 희석'일 수 있음 — 조만간 가치 폭락 위험.<br>
+  <b>현재 흑자 체인</b>: {', '.join(_positive_chains) if _positive_chains else '없음'}
+</div>""", unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── 섹션 6: 개발자 모멘텀 vs 자본 모멘텀 버블 차트 ──────────────
+    st.markdown("---")
+    st.markdown("### 🫧 개발자 모멘텀 vs 자본 모멘텀 — 미래 고래는 어디로 향하는가?")
+    st.caption(
+        "X축: GitHub 커밋 수 (28일) — 자본보다 먼저 움직이는 미래 선행 지표  |  "
+        "Y축: TVL 모멘텀 — 현재 자금 유입 속도  |  버블 크기: 사용자당 TVL ($K)"
+    )
+
+    with st.spinner("GitHub 개발자 활동 데이터 로드 중... (최초 로드 시 수초 소요)"):
+        dev_map: dict[str, int] = {}
+        for chain in show_chains:
+            owner, repo = GITHUB_REPOS.get(chain, ("", ""))
+            if owner:
+                count = fetch_github_commits_28d(owner, repo)
+                dev_map[chain] = count if count else DEV_COMMITS_FALLBACK.get(chain, 0)
+            else:
+                dev_map[chain] = DEV_COMMITS_FALLBACK.get(chain, 0)
+
+    col_bub, col_bleg = st.columns([3, 1])
+    with col_bub:
+        st.plotly_chart(
+            chart_dev_capital_bubble(tvl_hist, tvl_now, dev_map, show_chains, momentum_window),
+            use_container_width=True,
+        )
+    with col_bleg:
+        st.markdown("**버블 크기 범례**")
+        for chain in show_chains:
+            tvl = tvl_now.get(chain, 0)
+            dau = DAU_ESTIMATES.get(chain, 1)
+            eff = tvl / dau / 1_000 if tvl > 0 else 0
+            commits = dev_map.get(chain, 0)
+            c = CHAINS[chain]
+            st.markdown(
+                f"<div style='margin:4px 0;font-size:0.8rem;color:{c['color']};'>"
+                f"<b>{c['icon']} {chain}</b><br>"
+                f"<span style='color:{THEME['subtext']};'>"
+                f"커밋 {commits} · TVL/DAU ${eff:,.0f}K</span></div>",
+                unsafe_allow_html=True,
+            )
+        st.markdown(f"""
+<div style="margin-top:1rem;background:{THEME['card']};padding:0.7rem;
+            border-radius:6px;font-size:0.75rem;color:{THEME['subtext']};">
+  <b>4분면 해석</b><br>
+  🔥 우상: 현재 + 미래 강한 체인<br>
+  💰 좌상: 자본 버블 주의<br>
+  👀 우하: 개발자 선행 — 매수 후보<br>
+  📉 좌하: 쇠퇴 신호
+</div>""", unsafe_allow_html=True)
+
+    st.markdown(f"""
+<div style="background:{THEME['card']};border-left:3px solid {THEME['blue']};
+            padding:0.8rem 1.1rem;border-radius:6px;font-size:0.8rem;
+            color:{THEME['text']};line-height:1.7;margin-top:0.5rem;">
+  <b>📌 분석 포인트</b><br>
+  • TVL(자본)은 <b>후행 지표</b> — 돈이 움직이기 전에는 항상 개발자가 먼저 움직임.<br>
+  • 커밋 수가 많은데 TVL 모멘텀이 낮은 체인(우하 사분면) =
+    <b>'개발자 선행 진입 구간'</b> — 향후 6~12개월 주목 대상.<br>
+  • GitHub 데이터는 메인 레포지터리 커밋만 집계 (생태계 전체 활동 미반영).
+</div>""", unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
 
     # ── 데이터 소스 안내 ─────────────────────────────────────────────
     st.markdown("---")
