@@ -952,6 +952,87 @@ def chart_entity_nakamoto_bar() -> go.Figure:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  종합 취약성 레이더 차트
+# ═══════════════════════════════════════════════════════════════════════
+
+def chart_radar(
+    btc_scores: list,
+    eth_scores: list,
+    sol_scores: list,
+) -> go.Figure:
+    """
+    5차원 보안 레이더 차트: BTC / ETH / SOL 비교
+    axes (index):
+      0. 지리적 분산도   — 국가·지역별 분산 (높을수록 안전)
+      1. 자본 분산도     — 단일 엔티티 집중도 역수 (높을수록 안전)
+      2. 공격 비용       — SRI·슬래싱 억제력 포함 (높을수록 안전)
+      3. 사후 복구 탄력성 — 슬래싱·포크 대응력 (높을수록 안전)
+      4. 하드웨어 진입장벽 — 공격자 진입 난이도 (높을수록 안전)
+    """
+    categories = [
+        "지리적<br>분산도",
+        "자본<br>분산도",
+        "공격<br>비용",
+        "사후 복구<br>탄력성",
+        "하드웨어<br>진입장벽",
+    ]
+    cats_c = categories + [categories[0]]   # 폴리곤 닫기
+
+    chains = [
+        ("BTC", btc_scores, BTC_C,  "rgba(247,147,26,0.12)"),
+        ("ETH", eth_scores, ETH_C,  "rgba(98,126,234,0.12)"),
+        ("SOL", sol_scores, SOL_C,  "rgba(153,69,255,0.12)"),
+    ]
+
+    fig = go.Figure()
+    for name, scores, line_c, fill_c in chains:
+        vals = list(scores) + [scores[0]]
+        fig.add_trace(go.Scatterpolar(
+            r         = vals,
+            theta     = cats_c,
+            name      = name,
+            fill      = "toself",
+            fillcolor = fill_c,
+            line      = dict(color=line_c, width=2.5),
+            hovertemplate = "%{theta}: <b>%{r:.0f}</b> / 100<extra>" + name + "</extra>",
+        ))
+
+    fig.update_layout(
+        polar=dict(
+            bgcolor     = THEME["bg"],
+            radialaxis  = dict(
+                visible     = True,
+                range       = [0, 100],
+                gridcolor   = THEME["grid"],
+                linecolor   = THEME["grid"],
+                tickfont    = dict(color=THEME["subtext"], size=9),
+                tickvals    = [25, 50, 75, 100],
+            ),
+            angularaxis = dict(
+                gridcolor = THEME["grid"],
+                linecolor = THEME["grid"],
+                tickfont  = dict(color=THEME["text"], size=11),
+            ),
+        ),
+        paper_bgcolor = THEME["paper"],
+        font          = dict(color=THEME["text"]),
+        legend        = dict(
+            bgcolor     = THEME["paper"],
+            bordercolor = THEME["grid"],
+            borderwidth = 1,
+            font        = dict(color=THEME["text"], size=12),
+            orientation = "h",
+            x           = 0.5,
+            xanchor     = "center",
+            y           = -0.12,
+        ),
+        margin = dict(t=40, b=80, l=70, r=70),
+        height = 460,
+    )
+    return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  메인
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -1002,6 +1083,21 @@ def main():
         st.subheader("📅 분석 기간")
         history_days = st.selectbox(
             "히스토리 기간", [30, 60, 90, 180, 365], index=3,
+        )
+
+        st.subheader("⚖️ 취약성 가중치 설정")
+        st.caption("점수가 높을수록 해당 리스크를 더 심각하게 평가합니다.")
+        geo_weight = st.slider(
+            "지리적 위험 가중치",
+            min_value=0.1, max_value=2.0, value=1.0, step=0.1,
+            help="높을수록 BTC의 지리적 집중 리스크를 더 심각하게 평가. "
+                 "정치적 불안정이나 국가 규제를 더 두려워한다면 높게 설정.",
+        )
+        capital_weight = st.slider(
+            "자본 집중 가중치",
+            min_value=0.1, max_value=2.0, value=1.0, step=0.1,
+            help="높을수록 ETH의 기관 자본 집중 리스크를 더 심각하게 평가. "
+                 "월가 자본이나 거래소 지배를 더 두려워한다면 높게 설정.",
         )
 
     # ── 데이터 로드 ───────────────────────────────────────────────────
@@ -1350,6 +1446,174 @@ def main():
   </div>
 </div>""", unsafe_allow_html=True)
 
+    # ── 섹션 7-A: 종합 네트워크 취약성 분석 ─────────────────────────
+    st.markdown("---")
+    st.markdown("### 🎯 종합 네트워크 취약성 분석")
+    st.caption(
+        "취약성 공식: **R = (상위 3개 엔티티 점유율 / 나카모토 계수) × 가중치** — "
+        "점수가 높을수록 특정 세력에 의해 장악되기 쉬운 상태"
+    )
+
+    # ── 33.3% 임계선 실시간 경보 ──────────────────────────────────
+    _geo_warn = [d for d in HASHRATE_GEO if d["iso3"] and d["share"] > 33.3]
+    _ent_warn = [d for d in ETH_STAKING_ENTITIES if d["share"] > 33.3]
+
+    if _geo_warn:
+        for _d in _geo_warn:
+            st.error(
+                f"⚠️ **[지리적 경고]** {_d['country']} ({_d.get('country_en', '')})의 "
+                f"BTC 해시레이트 점유율 **{_d['share']:.1f}%** — "
+                f"33.3% 라이브니스 임계선 초과! 해당 국가 단독으로 블록 최종성 방해 가능.",
+                icon="🚨",
+            )
+
+    if _ent_warn:
+        for _d in _ent_warn:
+            st.error(
+                f"⚠️ **[자본 경고]** {_d['entity']}의 ETH 스테이킹 점유율 "
+                f"**{_d['share']:.1f}%** — "
+                f"33.3% 라이브니스 임계선 초과! 단독으로 블록 최종성 방해 가능.",
+                icon="🚨",
+            )
+
+    # Lido 접근 경보 (28~33.3% 구간)
+    _lido_now = next(d["share"] for d in ETH_STAKING_ENTITIES if d["entity"] == "Lido")
+    if 25.0 <= _lido_now < 33.3:
+        st.warning(
+            f"🟡 **[자본 주의]** Lido 스테이킹 점유율 **{_lido_now:.1f}%** — "
+            f"33.3% 임계선까지 **{33.3 - _lido_now:.1f}%p** 남음. 추이 모니터링 필요.",
+        )
+
+    if not _geo_warn and not _ent_warn:
+        st.success(
+            "✅ 현재 모든 단일 국가 / 엔티티 점유율이 33.3% 라이브니스 임계선 미만입니다.",
+        )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── 5차원 레이더 차트 점수 산출 ────────────────────────────────
+    # 0-100 스케일, 높을수록 해당 차원에서 더 안전
+    # (일부는 실시간 지표 기반, 일부는 연구 기반 고정값)
+
+    # 지리적 분산도: 나카모토 계수 / 최대 이상값(7) 정규화
+    _r_geo_btc = max(10, min(90, (nakamoto_preview / 7) * 100))
+    _r_geo_eth = 82.0   # 전 세계 검증인 분산 (AWS/GCP 의존도 제외 고정)
+    _r_geo_sol = 70.0   # 글로벌 검증인, 일부 VC·US 서버 집중
+
+    # 자본 분산도: 최대 단일 엔티티 점유율 역산
+    _r_cap_btc = 68.0   # 수천 명의 독립 채굴자 (Foundry USA ~30% 반영)
+    _r_cap_eth = max(10, min(90, (1 - lido_share_v / 50) * 100))  # Lido 기반
+    _r_cap_sol = 55.0   # 중간 수준 집중 (상위 Superminority 검증인)
+
+    # 공격 비용: PoW는 SRI 낮음 / PoS는 슬래싱 억제력 포함
+    _r_cost_btc = 30.0  # BTC SRI ~0.4–0.5% (하드웨어 비용 << 시총)
+    _r_cost_eth = 75.0  # ETH 슬래싱으로 공격 = 자본 자살
+    _r_cost_sol = 55.0  # 중간 수준
+
+    # 사후 복구 탄력성: 슬래싱 자동 실행 여부, 포크 속도
+    _r_rec_btc  = 48.0  # 알고리즘 포크 가능하나 수개월 소요, 페널티 없음
+    _r_rec_eth  = 85.0  # 슬래싱 자동 실행, 공격자 자본 즉시 소각
+    _r_rec_sol  = 55.0  # 커뮤니티 조율 필요
+
+    # 하드웨어 진입장벽: 공격자 기준 — ASIC 공급망 vs 유동 자본 매수
+    _r_hw_btc   = 65.0  # ASIC 전용, 제조사 한정, 6개월+ 리드타임
+    _r_hw_eth   = 35.0  # 유동 자본만 필요, 시장에서 즉시 매수 가능
+    _r_hw_sol   = 40.0  # 자본만 필요, ETH 대비 낮은 유동성
+
+    _btc_radar = [_r_geo_btc, _r_cap_btc, _r_cost_btc, _r_rec_btc, _r_hw_btc]
+    _eth_radar = [_r_geo_eth, _r_cap_eth, _r_cost_eth, _r_rec_eth, _r_hw_eth]
+    _sol_radar = [_r_geo_sol, _r_cap_sol, _r_cost_sol, _r_rec_sol, _r_hw_sol]
+
+    col_radar, col_rtbl = st.columns([3, 2])
+    with col_radar:
+        st.plotly_chart(
+            chart_radar(_btc_radar, _eth_radar, _sol_radar),
+            use_container_width=True,
+        )
+    with col_rtbl:
+        st.markdown("**5차원 보안 프로필 (0–100, 높을수록 안전)**")
+        _radar_df = pd.DataFrame({
+            "보안 차원": [
+                "지리적 분산도", "자본 분산도",
+                "공격 비용", "사후 복구 탄력성", "하드웨어 진입장벽",
+            ],
+            "₿ BTC": [f"{v:.0f}" for v in _btc_radar],
+            "Ξ ETH": [f"{v:.0f}" for v in _eth_radar],
+            "◎ SOL": [f"{v:.0f}" for v in _sol_radar],
+        })
+        st.dataframe(_radar_df.set_index("보안 차원"), use_container_width=True, height=220)
+        st.caption(
+            "• **지리적 분산도**: 나카모토 계수(국가) 기반\n"
+            "• **자본 분산도**: Lido·채굴 풀 집중도 역산\n"
+            "• **공격 비용**: SRI + 슬래싱 억제력 포함\n"
+            "• **사후 복구 탄력성**: 슬래싱 자동화·포크 속도\n"
+            "• **하드웨어 진입장벽**: 공격자 진입 난이도\n\n"
+            "⚠️ 교육 목적 정성 점수 — 연구 기반 추정치"
+        )
+
+    # ── 가중치 조정 취약성 점수 ───────────────────────────────────
+    st.markdown("#### ⚖️ 가중치 조정 취약성 점수")
+    st.caption(
+        f"지리적 가중치: **{geo_weight:.1f}×** · 자본 가중치: **{capital_weight:.1f}×** "
+        f"— 사이드바 슬라이더로 조절 가능"
+    )
+
+    # 취약성 점수 계산 (가중치 적용)
+    # R_btc = (top3_hash / nakamoto_geo) × geo_weight
+    # R_eth = (top3_entity / nakamoto_entity) × capital_weight
+    _v_btc_nak  = 1 / nakamoto_preview
+    _v_btc_top  = geo_sorted[0]["share"] / 100
+    _v_btc_geo  = geo_risk_pct / 100
+    _v_eth_nak  = 1 / nak33_val
+    _v_eth_top  = lido_share_v / 100
+    _v_eth_geo  = top_inst_3 / 100
+
+    btc_vuln_w = min(100, (
+        _v_btc_nak * 0.4 * geo_weight
+        + _v_btc_top * 0.4 * geo_weight
+        + _v_btc_geo * 0.2 * geo_weight
+    ) * 100)
+    eth_vuln_w = min(100, (
+        _v_eth_nak * 0.4 * capital_weight
+        + _v_eth_top * 0.4 * capital_weight
+        + _v_eth_geo * 0.2 * capital_weight
+    ) * 100)
+
+    _more_vuln = "₿ BTC" if btc_vuln_w > eth_vuln_w else ("Ξ ETH" if eth_vuln_w > btc_vuln_w else "동등")
+    _diff      = abs(btc_vuln_w - eth_vuln_w)
+
+    wv1, wv2, wv3 = st.columns(3)
+    wv1.metric(
+        "₿ BTC 취약성 점수",
+        f"{btc_vuln_w:.1f} / 100",
+        help="R_btc = (상위국 해시 / 나카모토_국가) × 지리적 가중치",
+    )
+    wv2.metric(
+        "Ξ ETH 취약성 점수",
+        f"{eth_vuln_w:.1f} / 100",
+        help="R_eth = (상위 엔티티 지분 / 나카모토_엔티티) × 자본 가중치",
+    )
+    wv3.metric(
+        "현재 더 취약한 체인",
+        _more_vuln,
+        f"{_diff:.1f}점 차",
+        delta_color="off",
+    )
+
+    with st.expander("📐 취약성 점수 공식 상세"):
+        st.markdown(f"""
+**공식**: `R = (1/나카모토계수) × 0.4 × 가중치 + 최대엔티티% × 0.4 × 가중치 + 집합리스크% × 0.2 × 가중치`
+
+| 항목 | ₿ BTC (geo_weight={geo_weight:.1f}×) | Ξ ETH (capital_weight={capital_weight:.1f}×) |
+|---|---|---|
+| 나카모토 계수 항 | 1/{nakamoto_preview} × 40 × {geo_weight:.1f} = **{_v_btc_nak*40*geo_weight:.1f}** | 1/{nak33_val} × 40 × {capital_weight:.1f} = **{_v_eth_nak*40*capital_weight:.1f}** |
+| 최대 단일 엔티티 항 | {geo_sorted[0]['share']:.1f} × 0.4 × {geo_weight:.1f} = **{_v_btc_top*40*geo_weight:.1f}** | {lido_share_v:.1f} × 0.4 × {capital_weight:.1f} = **{_v_eth_top*40*capital_weight:.1f}** |
+| 집합 리스크 항 | {geo_risk_pct:.1f} × 0.2 × {geo_weight:.1f} = **{_v_btc_geo*20*geo_weight:.1f}** | {top_inst_3:.1f} × 0.2 × {capital_weight:.1f} = **{_v_eth_geo*20*capital_weight:.1f}** |
+| **합계** | **{btc_vuln_w:.1f}점** | **{eth_vuln_w:.1f}점** |
+
+> 교육·참고 목적의 단순화 모델. 법적 장벽, 경제적 억제, 기술 대응 등 미반영.
+""")
+
     # ── 섹션 7: 지정학적 vs 자본적 집중도 대조 비교 ────────────────
     st.markdown("---")
     st.markdown("### 🆚 집중도 대조: 지정학적(BTC) vs 자본적(ETH)")
@@ -1359,17 +1623,24 @@ def main():
         icon="🤔",
     )
 
-    # 종합 취약성 점수 계산
-    # 공식: (1/나카모토계수 × 0.4) + (최대단일엔티티/100 × 0.4) + (지정학리스크/100 × 0.2)
+    # 종합 취약성 점수 계산 (사이드바 가중치 적용)
     btc_nak_score   = 1 / nakamoto_preview
     btc_top_score   = geo_sorted[0]["share"] / 100
     btc_geo_score   = geo_risk_pct / 100
-    btc_vuln        = (btc_nak_score * 0.4 + btc_top_score * 0.4 + btc_geo_score * 0.2) * 100
+    btc_vuln        = min(100, (
+        btc_nak_score * 0.4 * geo_weight
+        + btc_top_score * 0.4 * geo_weight
+        + btc_geo_score * 0.2 * geo_weight
+    ) * 100)
 
     eth_nak_score   = 1 / nak33_val
     eth_top_score   = lido_share_v / 100
     eth_geo_score   = top_inst_3 / 100
-    eth_vuln        = (eth_nak_score * 0.4 + eth_top_score * 0.4 + eth_geo_score * 0.2) * 100
+    eth_vuln        = min(100, (
+        eth_nak_score * 0.4 * capital_weight
+        + eth_top_score * 0.4 * capital_weight
+        + eth_geo_score * 0.2 * capital_weight
+    ) * 100)
 
     # 비교 테이블
     cmp_df = pd.DataFrame({
@@ -1477,19 +1748,18 @@ def main():
         )
         st.plotly_chart(fig_eth_gauge, use_container_width=True)
 
-    with st.expander("📐 종합 취약성 점수 산출 공식"):
+    with st.expander("📐 종합 취약성 점수 산출 공식 (가중치 적용)"):
         st.markdown(f"""
-**공식**: `취약성 점수 = (1/나카모토계수) × 40 + 최대단일엔티티% × 0.4 + 상위3합산% × 0.2`
+**공식**: `점수 = (1/나카모토계수 × 0.4 + 최대엔티티% × 0.4 + 집합리스크% × 0.2) × 가중치 × 100`
 
-| 항목 | BTC | ETH |
+| 항목 | ₿ BTC (geo {geo_weight:.1f}×) | Ξ ETH (capital {capital_weight:.1f}×) |
 |---|---|---|
-| 나카모토 계수 항 | 1/{nakamoto_preview} × 40 = {1/nakamoto_preview*40:.1f} | 1/{nak33_val} × 40 = {1/nak33_val*40:.1f} |
-| 최대 단일 엔티티 항 | {geo_sorted[0]['share']:.1f} × 0.4 = {geo_sorted[0]['share']*0.4:.1f} | {lido_share_v:.1f} × 0.4 = {lido_share_v*0.4:.1f} |
-| 집합 리스크 항 | {geo_risk_pct:.1f} × 0.2 = {geo_risk_pct*0.2:.1f} | {top_inst_3:.1f} × 0.2 = {top_inst_3*0.2:.1f} |
+| 나카모토 계수 항 | 1/{nakamoto_preview} × 40 × {geo_weight:.1f} = {btc_nak_score*40*geo_weight:.1f} | 1/{nak33_val} × 40 × {capital_weight:.1f} = {eth_nak_score*40*capital_weight:.1f} |
+| 최대 단일 엔티티 항 | {geo_sorted[0]['share']:.1f} × 0.4 × {geo_weight:.1f} = {btc_top_score*40*geo_weight:.1f} | {lido_share_v:.1f} × 0.4 × {capital_weight:.1f} = {eth_top_score*40*capital_weight:.1f} |
+| 집합 리스크 항 | {geo_risk_pct:.1f} × 0.2 × {geo_weight:.1f} = {btc_geo_score*20*geo_weight:.1f} | {top_inst_3:.1f} × 0.2 × {capital_weight:.1f} = {eth_geo_score*20*capital_weight:.1f} |
 | **합계** | **{btc_vuln:.1f}점** | **{eth_vuln:.1f}점** |
 
-> 이 지수는 교육·참고 목적의 단순화된 모델입니다.
-> 실제 보안은 법적 장벽, 경제적 억제, 기술 대응 등 다양한 요인이 복합 작용합니다.
+> 교육·참고 목적의 단순화 모델. 사이드바의 가중치 슬라이더로 점수를 조절할 수 있습니다.
 """)
 
     # ── 섹션 8: 보안 모델 비교 테이블 ───────────────────────────────
